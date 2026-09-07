@@ -33,6 +33,8 @@ public final class LagEventManager {
     private final PerformanceReplayManager replayManager =
             new PerformanceReplayManager();
 
+    private PerformanceAnalyzer.AnalysisResult pendingAnalysis;
+
     private long nextEventId = 1L;
 
     /**
@@ -82,23 +84,24 @@ public final class LagEventManager {
             return;
         }
 
+        int safeBefore =
+                Math.max(0, framesBefore);
+
+        int safeAfter =
+                Math.max(0, framesAfter);
+
         replayManager.start(
                 event,
                 timeline,
-                Math.max(0, framesBefore),
-                Math.max(0, framesAfter)
+                safeBefore,
+                safeAfter
         );
 
         pendingAnalysis = analysis;
     }
 
     /**
-     * Analysis belonging to the currently pending event.
-     */
-    private PerformanceAnalyzer.AnalysisResult pendingAnalysis;
-
-    /**
-     * Called every render frame.
+     * Called once per render frame.
      *
      * When the replay has enough future frames,
      * the complete LagEvent is created and stored.
@@ -212,6 +215,13 @@ public final class LagEventManager {
      */
     public LagEvent getLatest() {
         return history.getLatest();
+    }
+
+    /**
+     * Returns the latest completed performance replay.
+     */
+    public PerformanceReplay.Replay getLatestReplay() {
+        return replayManager.getLatestReplay();
     }
 
     /**
