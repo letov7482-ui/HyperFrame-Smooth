@@ -7,6 +7,8 @@ import com.hyperframe.core.FrameStatistics;
 import com.hyperframe.core.PerformanceAnalyzer;
 import com.hyperframe.core.PerformanceEvent;
 import com.hyperframe.core.PerformanceHistory;
+import com.hyperframe.core.PerformanceReplay;
+import com.hyperframe.core.PerformanceReplayManager;
 import com.hyperframe.core.PerformanceSnapshot;
 import com.hyperframe.core.PerformanceSnapshotHistory;
 import com.hyperframe.core.PerformanceTimeline;
@@ -62,6 +64,15 @@ public class HyperFrame implements ClientModInitializer {
             new PerformanceTimeline();
 
     /**
+     * Manages performance replay capture.
+     *
+     * When a spike is detected, the manager waits for
+     * additional frames and then completes the replay.
+     */
+    public static final PerformanceReplayManager REPLAY_MANAGER =
+            new PerformanceReplayManager();
+
+    /**
      * Spike threshold used for general statistics.
      */
     private static final double SPIKE_THRESHOLD_MS = 25.0;
@@ -74,6 +85,10 @@ public class HyperFrame implements ClientModInitializer {
 
         System.out.println(
                 "[HyperFrame] Performance Time Machine initialized."
+        );
+
+        System.out.println(
+                "[HyperFrame] Performance Replay initialized."
         );
     }
 
@@ -89,32 +104,43 @@ public class HyperFrame implements ClientModInitializer {
                 FRAME_MONITOR.getLatestFrame();
 
         /*
-         * There is no measurable frame yet
-         * during the very first render call.
+         * There is no measurable frame yet during
+         * the very first render call.
          */
         if (latestFrame == null) {
             return;
         }
 
         /*
-         * Store the raw frame inside the Time Machine.
-         *
-         * This happens before spike analysis so that
-         * every measurable frame is preserved.
+         * Store every measured frame in the Time Machine.
          */
         PERFORMANCE_TIMELINE.record(latestFrame);
+
+        /*
+         * Continue an already active replay.
+         *
+         * If enough frames have appeared after the
+         * original spike, the replay becomes complete.
+         */
+        PerformanceReplay.Replay completedReplay =
+                REPLAY_MANAGER.update(
+                        PERFORMANCE_TIMELINE
+                );
+
+        if (completedReplay != null) {
+            onReplayCompleted(completedReplay);
+        }
 
         /*
          * Analyze the current frame for spikes.
          */
         SpikeDetector.SpikeResult result =
-                SPIKE_DETECTOR.analyze(FRAME_MONITOR);
+                SPIKE_DETECTOR.analyze(
+                        FRAME_MONITOR
+                );
 
         /*
          * Store a complete performance snapshot.
-         *
-         * Snapshots are useful for reconstructing
-         * the general performance state over time.
          */
         PerformanceSnapshot snapshot =
                 PerformanceSnapshot.capture(
@@ -165,10 +191,20 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * Console diagnostic.
+         * Start a replay for the first spike
+         * that is not already being recorded.
          *
-         * Later this information will be shown
-         * directly inside the HyperFrame GUI.
+         * The manager will wait for the future frames.
+         */
+        if (!REPLAY_MANAGER.isRecording()) {
+            REPLAY_MANAGER.start(
+                    event,
+                    PERFORMANCE_TIMELINE
+            );
+        }
+
+        /*
+         * Console diagnostic.
          */
         System.out.println(
                 "[HyperFrame] "
@@ -190,6 +226,53 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
+     * Called when a replay has collected enough
+     * frames after the performance event.
+     */
+    private static void onReplayCompleted(
+            PerformanceReplay.Replay replay
+    ) {
+        FrameSample center =
+                replay.getCenterFrame();
+
+        FrameSample worst =
+                replay.getWorstFrame();
+
+        System.out.println(
+                "[HyperFrame] "
+                        + "REPLAY COMPLETE"
+                        + " | eventFrame="
+                        + replay.event().frameNumber()
+                        + " | frames="
+                        + replay.getFrameCount()
+                        + " | type="
+                        + replay.type()
+        );
+
+        if (center != null) {
+            System.out.println(
+                    "[HyperFrame] "
+                            + "Replay center"
+                            + " | frametime="
+                            + format(center.frameTimeMs())
+                            + "ms"
+            );
+        }
+
+        if (worst != null) {
+            System.out.println(
+                    "[HyperFrame] "
+                            + "Replay worst"
+                            + " | frame="
+                            + worst.frameNumber()
+                            + " | frametime="
+                            + format(worst.frameTimeMs())
+                            + "ms"
+            );
+        }
+    }
+
+    /**
      * Returns the most recent frame.
      */
     public static FrameSample getLatestFrame() {
@@ -198,11 +281,6 @@ public class HyperFrame implements ClientModInitializer {
 
     /**
      * Returns frames around a performance event.
-     *
-     * This will later power the Time Machine UI.
-     *
-     * Example:
-     * 60 frames before + event + 60 frames after.
      */
     public static FrameSample[] getTimelineAround(
             long frameNumber,
@@ -242,7 +320,42 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
-     * Clears all collected performance history.
+     * Returns the latest completed replay.
+     */
+    public static PerformanceReplay.Replay getLatestReplay() {
+        return REPLAY_MANAGER.getLatestReplay();
+    }
+
+    /**
+     * Returns whether HyperFrame is currently
+     * collecting a replay.
+     */
+    public static boolean isReplayRecording() {
+        return REPLAY_MANAGER.isRecording();
+    }
+
+    /**
+     * Returns replay collection progress
+     * from 0.0 to 1.0.
+     */
+    public static double getReplayProgress() {
+        return REPLAY_MANAGER.getProgress(
+                PERFORMANCE_TIMELINE
+        );
+    }
+
+    /**
+     * Returns the number of frames still needed
+     * to complete the current replay.
+     */
+    public static int getReplayRemainingFrames() {
+        return REPLAY_MANAGER.getRemainingFrames(
+                PERFORMANCE_TIMELINE
+        );
+    }
+
+    /**
+     * Clears all collected performance data.
      */
     public static void resetPerformanceData() {
         FRAME_MONITOR.reset();
@@ -250,6 +363,7 @@ public class HyperFrame implements ClientModInitializer {
         PERFORMANCE_HISTORY.reset();
         SNAPSHOT_HISTORY.reset();
         PERFORMANCE_TIMELINE.reset();
+        REPLAY_MANAGER.reset();
     }
 
     /**
@@ -262,4 +376,4 @@ public class HyperFrame implements ClientModInitializer {
                 value
         );
     }
-}
+    }
