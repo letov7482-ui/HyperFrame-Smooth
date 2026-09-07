@@ -4,11 +4,12 @@ import com.hyperframe.core.AdaptiveBaseline;
 import com.hyperframe.core.FrameMonitor;
 import com.hyperframe.core.FrameSample;
 import com.hyperframe.core.FrameStatistics;
+import com.hyperframe.core.LagEvent;
+import com.hyperframe.core.LagEventManager;
 import com.hyperframe.core.PerformanceAnalyzer;
 import com.hyperframe.core.PerformanceEvent;
 import com.hyperframe.core.PerformanceHistory;
 import com.hyperframe.core.PerformanceReplay;
-import com.hyperframe.core.PerformanceReplayManager;
 import com.hyperframe.core.PerformanceSnapshot;
 import com.hyperframe.core.PerformanceSnapshotHistory;
 import com.hyperframe.core.PerformanceTimeline;
@@ -57,20 +58,22 @@ public class HyperFrame implements ClientModInitializer {
     /**
      * Stores recent raw frame samples.
      *
-     * This is the foundation of the
-     * HyperFrame Performance Time Machine.
+     * Foundation of the HyperFrame Performance Time Machine.
      */
     public static final PerformanceTimeline PERFORMANCE_TIMELINE =
             new PerformanceTimeline();
 
     /**
      * Manages performance replay capture.
-     *
-     * When a spike is detected, the manager waits for
-     * additional frames and then completes the replay.
      */
-    public static final PerformanceReplayManager REPLAY_MANAGER =
-            new PerformanceReplayManager();
+    public static final com.hyperframe.core.PerformanceReplayManager REPLAY_MANAGER =
+            new com.hyperframe.core.PerformanceReplayManager();
+
+    /**
+     * Manages complete LagEvent creation and history.
+     */
+    public static final LagEventManager LAG_EVENT_MANAGER =
+            new LagEventManager();
 
     /**
      * Spike threshold used for general statistics.
@@ -89,6 +92,10 @@ public class HyperFrame implements ClientModInitializer {
 
         System.out.println(
                 "[HyperFrame] Performance Replay initialized."
+        );
+
+        System.out.println(
+                "[HyperFrame] Lag Event System initialized."
         );
     }
 
@@ -117,10 +124,8 @@ public class HyperFrame implements ClientModInitializer {
         PERFORMANCE_TIMELINE.record(latestFrame);
 
         /*
-         * Continue an already active replay.
-         *
-         * If enough frames have appeared after the
-         * original spike, the replay becomes complete.
+         * Continue collecting a replay that was
+         * started by an earlier performance event.
          */
         PerformanceReplay.Replay completedReplay =
                 REPLAY_MANAGER.update(
@@ -129,6 +134,22 @@ public class HyperFrame implements ClientModInitializer {
 
         if (completedReplay != null) {
             onReplayCompleted(completedReplay);
+        }
+
+        /*
+         * Continue the LagEvent lifecycle.
+         *
+         * When its replay becomes complete, the
+         * LagEventManager creates and stores a
+         * complete immutable LagEvent.
+         */
+        LagEvent completedLagEvent =
+                LAG_EVENT_MANAGER.update(
+                        PERFORMANCE_TIMELINE
+                );
+
+        if (completedLagEvent != null) {
+            onLagEventCompleted(completedLagEvent);
         }
 
         /*
@@ -191,14 +212,30 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * Start a replay for the first spike
-         * that is not already being recorded.
+         * Start the legacy replay manager.
          *
-         * The manager will wait for the future frames.
+         * This keeps the existing replay API alive
+         * while the LagEventManager manages complete
+         * immutable LagEvents separately.
          */
         if (!REPLAY_MANAGER.isRecording()) {
             REPLAY_MANAGER.start(
                     event,
+                    PERFORMANCE_TIMELINE
+            );
+        }
+
+        /*
+         * Start the complete LagEvent lifecycle.
+         *
+         * LagEventManager has its own replay manager,
+         * so it can safely wait for the complete
+         * before/event/after replay.
+         */
+        if (!LAG_EVENT_MANAGER.isRecording()) {
+            LAG_EVENT_MANAGER.start(
+                    event,
+                    analysis,
                     PERFORMANCE_TIMELINE
             );
         }
@@ -226,8 +263,8 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
-     * Called when a replay has collected enough
-     * frames after the performance event.
+     * Called when a replay managed by the original
+     * PerformanceReplayManager is completed.
      */
     private static void onReplayCompleted(
             PerformanceReplay.Replay replay
@@ -270,6 +307,52 @@ public class HyperFrame implements ClientModInitializer {
                             + "ms"
             );
         }
+    }
+
+    /**
+     * Called when a complete LagEvent has been created.
+     */
+    private static void onLagEventCompleted(
+            LagEvent event
+    ) {
+        System.out.println(
+                "[HyperFrame] "
+                        + "LAG EVENT #"
+                        + event.id()
+                        + " COMPLETE"
+        );
+
+        System.out.println(
+                "[HyperFrame] "
+                        + "LagEvent"
+                        + " | frame="
+                        + event.frameNumber()
+                        + " | frametime="
+                        + format(event.frameTimeMs())
+                        + "ms"
+                        + " | baseline="
+                        + format(event.baselineMs())
+                        + "ms"
+        );
+
+        System.out.println(
+                "[HyperFrame] "
+                        + "Analysis"
+                        + " | type="
+                        + event.type()
+                        + " | pattern="
+                        + event.pattern()
+                        + " | confidence="
+                        + event.confidencePercent()
+                        + "%"
+        );
+
+        System.out.println(
+                "[HyperFrame] "
+                        + "Replay"
+                        + " | frames="
+                        + event.replayFrameCount()
+        );
     }
 
     /**
@@ -327,8 +410,8 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
-     * Returns whether HyperFrame is currently
-     * collecting a replay.
+     * Returns whether the original replay system
+     * is currently collecting a replay.
      */
     public static boolean isReplayRecording() {
         return REPLAY_MANAGER.isRecording();
@@ -345,11 +428,67 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
-     * Returns the number of frames still needed
-     * to complete the current replay.
+     * Returns how many frames are still needed
+     * to complete the original replay.
      */
     public static int getReplayRemainingFrames() {
         return REPLAY_MANAGER.getRemainingFrames(
+                PERFORMANCE_TIMELINE
+        );
+    }
+
+    /**
+     * Returns the latest complete LagEvent.
+     */
+    public static LagEvent getLatestLagEvent() {
+        return LAG_EVENT_MANAGER.getLatest();
+    }
+
+    /**
+     * Returns the total number of complete LagEvents.
+     */
+    public static int getLagEventCount() {
+        return LAG_EVENT_MANAGER.getEventCount();
+    }
+
+    /**
+     * Returns the number of severe LagEvents.
+     */
+    public static int getSevereLagEventCount() {
+        return LAG_EVENT_MANAGER.getSevereCount();
+    }
+
+    /**
+     * Returns the number of microstutter LagEvents.
+     */
+    public static int getMicrostutterLagEventCount() {
+        return LAG_EVENT_MANAGER.getMicrostutterCount();
+    }
+
+    /**
+     * Returns whether a complete LagEvent replay
+     * is currently being collected.
+     */
+    public static boolean isLagEventRecording() {
+        return LAG_EVENT_MANAGER.isRecording();
+    }
+
+    /**
+     * Returns LagEvent replay progress
+     * from 0.0 to 1.0.
+     */
+    public static double getLagEventProgress() {
+        return LAG_EVENT_MANAGER.getProgress(
+                PERFORMANCE_TIMELINE
+        );
+    }
+
+    /**
+     * Returns the number of frames still needed
+     * for the current LagEvent replay.
+     */
+    public static int getLagEventRemainingFrames() {
+        return LAG_EVENT_MANAGER.getRemainingFrames(
                 PERFORMANCE_TIMELINE
         );
     }
@@ -364,6 +503,7 @@ public class HyperFrame implements ClientModInitializer {
         SNAPSHOT_HISTORY.reset();
         PERFORMANCE_TIMELINE.reset();
         REPLAY_MANAGER.reset();
+        LAG_EVENT_MANAGER.reset();
     }
 
     /**
@@ -376,4 +516,4 @@ public class HyperFrame implements ClientModInitializer {
                 value
         );
     }
-    }
+}
