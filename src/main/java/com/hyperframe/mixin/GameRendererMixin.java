@@ -21,5 +21,6 @@ public class GameRendererMixin {
             CallbackInfo ci
     ) {
         HyperFrame.FRAME_MONITOR.beginFrame();
+        HyperFrame.analyzeFrame();
     }
 }
