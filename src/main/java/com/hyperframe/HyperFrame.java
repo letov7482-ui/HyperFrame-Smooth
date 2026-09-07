@@ -15,54 +15,95 @@ import com.hyperframe.core.PerformanceSnapshotHistory;
 import com.hyperframe.core.PerformanceTimeline;
 import com.hyperframe.core.SpikeDetector;
 import com.hyperframe.smooth.SafetyGuard;
+import com.hyperframe.smooth.SmoothController;
 import com.hyperframe.smooth.SmoothEngine;
 import net.fabricmc.api.ClientModInitializer;
 
 public class HyperFrame implements ClientModInitializer {
 
+    /**
+     * Collects real render-frame timing data.
+     */
     public static final FrameMonitor FRAME_MONITOR =
             new FrameMonitor();
 
+    /**
+     * Calculates FPS, frame-time lows,
+     * percentiles, variance and stability.
+     */
     public static final FrameStatistics FRAME_STATISTICS =
             new FrameStatistics(FRAME_MONITOR);
 
+    /**
+     * Detects frame-time spikes and microstutter.
+     */
     public static final SpikeDetector SPIKE_DETECTOR =
             new SpikeDetector();
 
+    /**
+     * Stores detected performance events.
+     */
     public static final PerformanceHistory PERFORMANCE_HISTORY =
             new PerformanceHistory();
 
+    /**
+     * Analyzes performance patterns.
+     */
     public static final PerformanceAnalyzer PERFORMANCE_ANALYZER =
             new PerformanceAnalyzer();
 
+    /**
+     * Stores recent performance snapshots.
+     */
     public static final PerformanceSnapshotHistory SNAPSHOT_HISTORY =
             new PerformanceSnapshotHistory();
 
+    /**
+     * Stores recent raw frame samples.
+     *
+     * Foundation of the Performance Time Machine.
+     */
     public static final PerformanceTimeline PERFORMANCE_TIMELINE =
             new PerformanceTimeline();
 
     /**
-     * Single owner of the complete LagEvent lifecycle.
+     * Owns the complete LagEvent lifecycle.
      */
     public static final LagEventManager LAG_EVENT_MANAGER =
             new LagEventManager();
 
     /**
-     * Decides whether a smoothing action is justified.
+     * Decides whether frame smoothing is justified.
      */
     public static final SmoothEngine SMOOTH_ENGINE =
             new SmoothEngine();
 
     /**
-     * Final safety layer before any optimization action.
+     * Final safety layer before an optimization action.
      */
     public static final SafetyGuard SAFETY_GUARD =
             new SafetyGuard();
 
+    /**
+     * Central coordinator between SmoothEngine
+     * and SafetyGuard.
+     *
+     * Uses the exact same shared instances above.
+     */
+    public static final SmoothController SMOOTH_CONTROLLER =
+            new SmoothController(
+                    SMOOTH_ENGINE,
+                    SAFETY_GUARD
+            );
+
+    /**
+     * General spike threshold used by statistics.
+     */
     private static final double SPIKE_THRESHOLD_MS = 25.0;
 
     @Override
     public void onInitializeClient() {
+
         System.out.println(
                 "[HyperFrame] Frame Stability Core initialized."
         );
@@ -82,6 +123,14 @@ public class HyperFrame implements ClientModInitializer {
         System.out.println(
                 "[HyperFrame] Safety Guard initialized."
         );
+
+        System.out.println(
+                "[HyperFrame] Smooth Controller initialized."
+        );
+
+        System.out.println(
+                "[HyperFrame] Smooth pipeline ready."
+        );
     }
 
     /**
@@ -89,15 +138,22 @@ public class HyperFrame implements ClientModInitializer {
      */
     public static void analyzeFrame() {
 
+        /*
+         * Get the latest frame measured by FrameMonitor.
+         */
         FrameSample latestFrame =
                 FRAME_MONITOR.getLatestFrame();
 
+        /*
+         * The first render call does not have a previous
+         * frame to compare against.
+         */
         if (latestFrame == null) {
             return;
         }
 
         /*
-         * Store the latest frame in the Performance Time Machine.
+         * Store the frame in the Performance Time Machine.
          */
         PERFORMANCE_TIMELINE.record(
                 latestFrame
@@ -118,7 +174,7 @@ public class HyperFrame implements ClientModInitializer {
         }
 
         /*
-         * Detect frame-time spikes.
+         * Analyze the latest frame for spikes.
          */
         SpikeDetector.SpikeResult result =
                 SPIKE_DETECTOR.analyze(
@@ -126,7 +182,7 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * Capture current performance statistics.
+         * Capture the current performance snapshot.
          */
         PerformanceSnapshot snapshot =
                 PerformanceSnapshot.capture(
@@ -140,11 +196,14 @@ public class HyperFrame implements ClientModInitializer {
         );
 
         /*
-         * No spike = no optimization decision required.
+         * Normal frame:
+         *
+         * SmoothController still receives the information,
+         * but SmoothEngine will normally return no action.
          */
         if (!result.detected()) {
 
-            SMOOTH_ENGINE.evaluate(
+            SMOOTH_CONTROLLER.evaluate(
                     result,
                     PerformanceAnalyzer.AnalysisResult.none(),
                     SPIKE_DETECTOR.getBaseline(),
@@ -154,6 +213,9 @@ public class HyperFrame implements ClientModInitializer {
             return;
         }
 
+        /*
+         * Current adaptive baseline.
+         */
         AdaptiveBaseline baseline =
                 SPIKE_DETECTOR.getBaseline();
 
@@ -187,11 +249,16 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * First decision layer:
-         * should HyperFrame even consider acting?
+         * Complete decision pipeline:
+         *
+         * SmoothEngine
+         *       ↓
+         * SafetyGuard
+         *
+         * Both are coordinated by SmoothController.
          */
-        SmoothEngine.Decision smoothDecision =
-                SMOOTH_ENGINE.evaluate(
+        SmoothController.Decision smoothDecision =
+                SMOOTH_CONTROLLER.evaluate(
                         result,
                         analysis,
                         baseline,
@@ -199,29 +266,15 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * Second decision layer:
-         * is the requested action safe enough?
+         * Handle the resulting decision.
          */
-        if (smoothDecision.hasAction()) {
-
-            SafetyGuard.Decision safetyDecision =
-                    SAFETY_GUARD.check(
-                            smoothDecision.action(),
-                            result.frameTimeMs(),
-                            baselineMs,
-                            baseline.getDeviationMs(),
-                            baseline.getSampleCount()
-                    );
-
-            onSmoothDecision(
-                    smoothDecision,
-                    safetyDecision
-            );
-        }
+        onSmoothDecision(
+                smoothDecision
+        );
 
         /*
-         * Start LagEvent replay if another replay
-         * is not already being collected.
+         * Start a LagEvent replay if another replay
+         * is not currently being collected.
          */
         if (!LAG_EVENT_MANAGER.isRecording()) {
 
@@ -243,10 +296,14 @@ public class HyperFrame implements ClientModInitializer {
                         + " | frame="
                         + result.frameNumber()
                         + " | frametime="
-                        + format(result.frameTimeMs())
+                        + format(
+                        result.frameTimeMs()
+                )
                         + "ms"
                         + " | baseline="
-                        + format(baselineMs)
+                        + format(
+                        baselineMs
+                )
                         + "ms"
                         + " | confidence="
                         + analysis.confidencePercent()
@@ -255,39 +312,74 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
-     * Handles the Smooth Engine + SafetyGuard decision chain.
-     *
-     * IMPORTANT:
-     * No real Minecraft optimization is executed here yet.
-     *
-     * This is the controlled entry point for the first
-     * real frame-smoothing mechanism.
+     * Handles the result of the complete
+     * SmoothController decision pipeline.
      */
     private static void onSmoothDecision(
-            SmoothEngine.Decision smoothDecision,
-            SafetyGuard.Decision safetyDecision
+            SmoothController.Decision decision
     ) {
 
-        if (safetyDecision.approved()) {
+        if (decision == null) {
+            return;
+        }
+
+        if (decision.approved()) {
 
             System.out.println(
                     "[HyperFrame] "
                             + "SMOOTH ACTION APPROVED"
                             + " | action="
-                            + safetyDecision.action()
+                            + decision.action()
+            );
+
+            /*
+             * IMPORTANT:
+             *
+             * The action is approved, but no real
+             * frame-smoothing operation is executed yet.
+             *
+             * This is the controlled entry point for
+             * the first real optimization mechanism.
+             */
+            return;
+        }
+
+        if (decision.active()) {
+
+            System.out.println(
+                    "[HyperFrame] "
+                            + "SMOOTH ACTION ACTIVE"
+                            + " | action="
+                            + decision.action()
             );
 
             return;
         }
 
-        System.out.println(
-                "[HyperFrame] "
-                        + "SMOOTH ACTION BLOCKED"
-                        + " | action="
-                        + smoothDecision.action()
-                        + " | reason="
-                        + safetyDecision.rejectReason()
-        );
+        if (decision.blocked()) {
+
+            if (decision.status()
+                    == SmoothController.Status.BLOCKED_BY_SAFETY) {
+
+                System.out.println(
+                        "[HyperFrame] "
+                                + "SMOOTH ACTION BLOCKED"
+                                + " | layer=SAFETY"
+                                + " | reason="
+                                + decision.safetyRejectReason()
+                );
+
+            } else {
+
+                System.out.println(
+                        "[HyperFrame] "
+                                + "SMOOTH ACTION BLOCKED"
+                                + " | layer=ENGINE"
+                                + " | reason="
+                                + decision.engineRejectReason()
+                );
+            }
+        }
     }
 
     /**
@@ -296,6 +388,7 @@ public class HyperFrame implements ClientModInitializer {
     private static void onLagEventCompleted(
             LagEvent event
     ) {
+
         System.out.println(
                 "[HyperFrame] "
                         + "LAG EVENT #"
@@ -350,10 +443,16 @@ public class HyperFrame implements ClientModInitializer {
         );
     }
 
+    /**
+     * Returns the latest frame from the Time Machine.
+     */
     public static FrameSample getLatestFrame() {
         return PERFORMANCE_TIMELINE.getLatest();
     }
 
+    /**
+     * Returns frames around a specified frame.
+     */
     public static FrameSample[] getTimelineAround(
             long frameNumber,
             int before,
@@ -366,6 +465,9 @@ public class HyperFrame implements ClientModInitializer {
         );
     }
 
+    /**
+     * Returns the worst frame inside a frame range.
+     */
     public static FrameSample getWorstTimelineFrame(
             long startFrame,
             long endFrame
@@ -376,6 +478,9 @@ public class HyperFrame implements ClientModInitializer {
         );
     }
 
+    /**
+     * Finds the frame nearest to a requested frame number.
+     */
     public static FrameSample findTimelineFrame(
             long frameNumber
     ) {
@@ -384,71 +489,116 @@ public class HyperFrame implements ClientModInitializer {
         );
     }
 
+    /**
+     * Returns the latest completed replay.
+     */
     public static PerformanceReplay.Replay getLatestReplay() {
         return LAG_EVENT_MANAGER.getLatestReplay();
     }
 
+    /**
+     * Returns whether a replay is being collected.
+     */
     public static boolean isReplayRecording() {
         return LAG_EVENT_MANAGER.isRecording();
     }
 
+    /**
+     * Returns replay progress from 0.0 to 1.0.
+     */
     public static double getReplayProgress() {
         return LAG_EVENT_MANAGER.getProgress(
                 PERFORMANCE_TIMELINE
         );
     }
 
+    /**
+     * Returns remaining replay frames.
+     */
     public static int getReplayRemainingFrames() {
         return LAG_EVENT_MANAGER.getRemainingFrames(
                 PERFORMANCE_TIMELINE
         );
     }
 
+    /**
+     * Returns the latest completed LagEvent.
+     */
     public static LagEvent getLatestLagEvent() {
         return LAG_EVENT_MANAGER.getLatest();
     }
 
+    /**
+     * Returns the number of LagEvents.
+     */
     public static int getLagEventCount() {
         return LAG_EVENT_MANAGER.getEventCount();
     }
 
+    /**
+     * Returns the number of severe LagEvents.
+     */
     public static int getSevereLagEventCount() {
         return LAG_EVENT_MANAGER.getSevereCount();
     }
 
+    /**
+     * Returns the number of microstutter LagEvents.
+     */
     public static int getMicrostutterLagEventCount() {
         return LAG_EVENT_MANAGER.getMicrostutterCount();
     }
 
+    /**
+     * Returns whether a LagEvent replay is active.
+     */
     public static boolean isLagEventRecording() {
         return LAG_EVENT_MANAGER.isRecording();
     }
 
+    /**
+     * Returns LagEvent replay progress.
+     */
     public static double getLagEventProgress() {
         return LAG_EVENT_MANAGER.getProgress(
                 PERFORMANCE_TIMELINE
         );
     }
 
+    /**
+     * Returns remaining LagEvent replay frames.
+     */
     public static int getLagEventRemainingFrames() {
         return LAG_EVENT_MANAGER.getRemainingFrames(
                 PERFORMANCE_TIMELINE
         );
     }
 
+    /**
+     * Returns all recorded LagEvents.
+     */
     public static LagEvent[] getLagEvents() {
         return LAG_EVENT_MANAGER
                 .getHistory()
                 .getEvents();
     }
 
+    /*
+     * =========================================================
+     * SMOOTH ENGINE
+     * =========================================================
+     */
+
     /**
-     * Smooth Engine status.
+     * Returns whether the Smooth Engine is enabled.
      */
     public static boolean isSmoothEngineEnabled() {
         return SMOOTH_ENGINE.isEnabled();
     }
 
+    /**
+     * Enables or disables the Smooth Engine.
+     */
     public static void setSmoothEngineEnabled(
             boolean enabled
     ) {
@@ -457,49 +607,193 @@ public class HyperFrame implements ClientModInitializer {
         );
     }
 
+    /**
+     * Returns the current Smooth Engine state.
+     */
     public static SmoothEngine.EngineState
     getSmoothEngineState() {
         return SMOOTH_ENGINE.getState();
     }
 
     /**
-     * SafetyGuard status.
+     * Returns the number of Smooth Engine decisions.
+     */
+    public static long getSmoothDecisions() {
+        return SMOOTH_ENGINE.getDecisions();
+    }
+
+    /**
+     * Returns accepted Smooth Engine decisions.
+     */
+    public static long getAcceptedSmoothDecisions() {
+        return SMOOTH_ENGINE.getAcceptedDecisions();
+    }
+
+    /**
+     * Returns rejected Smooth Engine decisions.
+     */
+    public static long getRejectedSmoothDecisions() {
+        return SMOOTH_ENGINE.getRejectedDecisions();
+    }
+
+    /*
+     * =========================================================
+     * SAFETY GUARD
+     * =========================================================
+     */
+
+    /**
+     * Returns the current SafetyGuard state.
      */
     public static SafetyGuard.SafetyState
     getSafetyGuardState() {
         return SAFETY_GUARD.getState();
     }
 
-    public static long getSmoothDecisions() {
-        return SMOOTH_ENGINE.getDecisions();
+    /**
+     * Returns how many safety checks were performed.
+     */
+    public static long getSafetyChecks() {
+        return SAFETY_GUARD.getChecks();
     }
 
-    public static long getAcceptedSmoothDecisions() {
-        return SMOOTH_ENGINE.getAcceptedDecisions();
-    }
-
+    /**
+     * Returns how many actions passed SafetyGuard.
+     */
     public static long getApprovedSafetyActions() {
         return SAFETY_GUARD.getApproved();
     }
 
+    /**
+     * Returns how many actions were rejected by SafetyGuard.
+     */
     public static long getRejectedSafetyActions() {
         return SAFETY_GUARD.getRejected();
     }
 
+    /*
+     * =========================================================
+     * SMOOTH CONTROLLER
+     * =========================================================
+     */
+
     /**
-     * Reset every HyperFrame performance subsystem.
+     * Returns whether SmoothController is enabled.
+     */
+    public static boolean isSmoothControllerEnabled() {
+        return SMOOTH_CONTROLLER.isEnabled();
+    }
+
+    /**
+     * Enables or disables the SmoothController.
+     */
+    public static void setSmoothControllerEnabled(
+            boolean enabled
+    ) {
+        SMOOTH_CONTROLLER.setEnabled(
+                enabled
+        );
+    }
+
+    /**
+     * Returns the current controller state.
+     */
+    public static SmoothController.ControllerState
+    getSmoothControllerState() {
+        return SMOOTH_CONTROLLER.getState();
+    }
+
+    /**
+     * Returns whether an optimization action
+     * is currently active.
+     */
+    public static boolean isSmoothActionActive() {
+        return SMOOTH_CONTROLLER.isActionActive();
+    }
+
+    /**
+     * Returns the currently active optimization action.
+     */
+    public static SmoothEngine.OptimizationAction
+    getActiveSmoothAction() {
+        return SMOOTH_CONTROLLER.getActiveAction();
+    }
+
+    /**
+     * Returns the number of controller evaluations.
+     */
+    public static long getSmoothControllerEvaluations() {
+        return SMOOTH_CONTROLLER.getEvaluations();
+    }
+
+    /**
+     * Returns the number of approved actions.
+     */
+    public static long getAcceptedSmoothActions() {
+        return SMOOTH_CONTROLLER.getAcceptedActions();
+    }
+
+    /**
+     * Returns the number of blocked actions.
+     */
+    public static long getBlockedSmoothActions() {
+        return SMOOTH_CONTROLLER.getBlockedActions();
+    }
+
+    /**
+     * Returns the number of completed actions.
+     */
+    public static long getCompletedSmoothActions() {
+        return SMOOTH_CONTROLLER.getCompletedActions();
+    }
+
+    /**
+     * Completes the currently active smoothing action.
+     */
+    public static void completeSmoothAction() {
+        SMOOTH_CONTROLLER.completeAction();
+    }
+
+    /**
+     * Cancels the currently active smoothing action.
+     */
+    public static void cancelSmoothAction() {
+        SMOOTH_CONTROLLER.cancelAction();
+            }
+
+    /*
+     * =========================================================
+     * RESET
+     * =========================================================
+     */
+
+    /**
+     * Resets every HyperFrame performance subsystem.
      */
     public static void resetPerformanceData() {
+
         FRAME_MONITOR.reset();
+
         SPIKE_DETECTOR.reset();
+
         PERFORMANCE_HISTORY.reset();
+
         SNAPSHOT_HISTORY.reset();
+
         PERFORMANCE_TIMELINE.reset();
+
         LAG_EVENT_MANAGER.reset();
+
+        SMOOTH_CONTROLLER.reset();
+
         SMOOTH_ENGINE.reset();
+
         SAFETY_GUARD.reset();
     }
 
+    /**
+     * Formats a metric for diagnostic output.
+     */
     private static String format(
             double value
     ) {
@@ -509,4 +803,4 @@ public class HyperFrame implements ClientModInitializer {
                 value
         );
     }
-            }
+}
