@@ -7,29 +7,41 @@ import com.hyperframe.core.SpikeDetector;
 /**
  * HyperFrame Smooth Controller.
  *
- * Coordinates the complete smoothing decision pipeline:
+ * Central coordinator for the smoothing decision pipeline:
  *
  * SpikeDetector
+ *      ↓
+ * PerformanceAnalyzer
+ *      ↓
+ * SmoothController
  *      ↓
  * SmoothEngine
  *      ↓
  * SafetyGuard
  *      ↓
- * SmoothController
- *      ↓
- * Safe optimization action
+ * Approved optimization action
+ *
+ * The controller owns neither the SmoothEngine nor the
+ * SafetyGuard. They are injected through the constructor,
+ * so HyperFrame can keep exactly one shared instance of each.
  *
  * IMPORTANT:
  *
- * This controller does not modify mouse input,
- * keyboard input, sensitivity, DPI, FOV or raw input.
+ * This class never modifies:
  *
- * It also does not add artificial frame delays.
+ * - mouse sensitivity
+ * - mouse DPI
+ * - raw input
+ * - keyboard behaviour
+ * - FOV
+ * - artificial input latency
  *
- * Until a real optimization mechanism is implemented,
- * approved FRAME_SMOOTHING actions remain observational.
+ * It also never adds artificial frame delays.
  */
 public final class SmoothController {
+
+    private final SmoothEngine smoothEngine;
+    private final SafetyGuard safetyGuard;
 
     private boolean enabled = true;
 
@@ -52,13 +64,35 @@ public final class SmoothController {
     private long completedActions;
 
     /**
+     * Creates a controller using the shared HyperFrame
+     * SmoothEngine and SafetyGuard instances.
+     */
+    public SmoothController(
+            SmoothEngine smoothEngine,
+            SafetyGuard safetyGuard
+    ) {
+        if (smoothEngine == null) {
+            throw new IllegalArgumentException(
+                    "smoothEngine cannot be null"
+            );
+        }
+
+        if (safetyGuard == null) {
+            throw new IllegalArgumentException(
+                    "safetyGuard cannot be null"
+            );
+        }
+
+        this.smoothEngine = smoothEngine;
+        this.safetyGuard = safetyGuard;
+    }
+
+    /**
      * Evaluates the current performance situation.
      *
-     * This method performs the complete:
+     * Pipeline:
      *
      * SmoothEngine → SafetyGuard
-     *
-     * decision chain.
      */
     public Decision evaluate(
             SpikeDetector.SpikeResult spike,
@@ -74,9 +108,11 @@ public final class SmoothController {
 
             blockedActions++;
 
-            return Decision.blocked(
-                    SmoothEngine.RejectReason.ENGINE_DISABLED,
-                    null
+            lastEngineRejectReason =
+                    SmoothEngine.RejectReason.ENGINE_DISABLED;
+
+            return Decision.blockedByEngine(
+                    SmoothEngine.RejectReason.ENGINE_DISABLED
             );
         }
 
@@ -92,15 +128,14 @@ public final class SmoothController {
             lastEngineRejectReason =
                     SmoothEngine.RejectReason.INVALID_DATA;
 
-            return Decision.blocked(
-                    SmoothEngine.RejectReason.INVALID_DATA,
-                    null
+            return Decision.blockedByEngine(
+                    SmoothEngine.RejectReason.INVALID_DATA
             );
         }
 
         /*
-         * Do not allow a new action while another
-         * action is active.
+         * Never start another optimization while one
+         * is already active.
          */
         if (isActionActive()) {
             state =
@@ -115,14 +150,12 @@ public final class SmoothController {
          * First decision layer.
          */
         SmoothEngine.Decision engineDecision =
-                HyperFrameSmoothEngineHolder
-                        .ENGINE
-                        .evaluate(
-                                spike,
-                                analysis,
-                                baseline,
-                                stabilityScore
-                        );
+                smoothEngine.evaluate(
+                        spike,
+                        analysis,
+                        baseline,
+                        stabilityScore
+                );
 
         if (!engineDecision.hasAction()) {
 
@@ -138,7 +171,7 @@ public final class SmoothController {
                 blockedActions++;
             }
 
-            return Decision.engineRejected(
+            return Decision.blockedByEngine(
                     engineDecision.rejectReason()
             );
         }
@@ -149,15 +182,13 @@ public final class SmoothController {
          * SafetyGuard gets the final word.
          */
         SafetyGuard.Decision safetyDecision =
-                HyperFrameSmoothEngineHolder
-                        .GUARD
-                        .check(
-                                engineDecision.action(),
-                                spike.frameTimeMs(),
-                                baseline.getBaselineMs(),
-                                baseline.getDeviationMs(),
-                                baseline.getSampleCount()
-                        );
+                safetyGuard.check(
+                        engineDecision.action(),
+                        spike.frameTimeMs(),
+                        baseline.getBaselineMs(),
+                        baseline.getDeviationMs(),
+                        baseline.getSampleCount()
+                );
 
         if (!safetyDecision.approved()) {
 
@@ -169,17 +200,19 @@ public final class SmoothController {
 
             blockedActions++;
 
-            return Decision.safetyRejected(
+            return Decision.blockedBySafety(
                     safetyDecision.rejectReason()
             );
         }
 
         /*
-         * Action is approved.
+         * Both layers approved the action.
          *
-         * We only register the action here.
-         * No artificial delay or input manipulation
-         * is performed.
+         * Register it as active.
+         *
+         * The controller itself does NOT perform an
+         * optimization here. A future real optimization
+         * implementation will consume this approved action.
          */
         activeAction =
                 safetyDecision.action();
@@ -195,10 +228,9 @@ public final class SmoothController {
     }
 
     /**
-     * Marks the currently active optimization action
-     * as completed.
+     * Completes the currently active action.
      *
-     * This releases the SafetyGuard action slot.
+     * This releases the corresponding SafetyGuard slot.
      */
     public void completeAction() {
 
@@ -206,9 +238,7 @@ public final class SmoothController {
             return;
         }
 
-        HyperFrameSmoothEngineHolder
-                .GUARD
-                .completeAction();
+        safetyGuard.completeAction();
 
         completedActions++;
 
@@ -224,8 +254,7 @@ public final class SmoothController {
     /**
      * Cancels the currently active action.
      *
-     * Used as a fail-safe when the controller decides
-     * that an action should no longer continue.
+     * Used as a fail-safe.
      */
     public void cancelAction() {
 
@@ -233,9 +262,7 @@ public final class SmoothController {
             return;
         }
 
-        HyperFrameSmoothEngineHolder
-                .GUARD
-                .completeAction();
+        safetyGuard.completeAction();
 
         activeAction =
                 SmoothEngine.OptimizationAction.NONE;
@@ -264,7 +291,7 @@ public final class SmoothController {
     }
 
     /**
-     * Returns current controller state.
+     * Returns the current controller state.
      */
     public ControllerState getState() {
         return state;
@@ -316,6 +343,20 @@ public final class SmoothController {
     }
 
     /**
+     * Returns the shared SmoothEngine instance.
+     */
+    public SmoothEngine getSmoothEngine() {
+        return smoothEngine;
+    }
+
+    /**
+     * Returns the shared SafetyGuard instance.
+     */
+    public SafetyGuard getSafetyGuard() {
+        return safetyGuard;
+    }
+
+    /**
      * Enables or disables the controller.
      */
     public void setEnabled(
@@ -334,6 +375,7 @@ public final class SmoothController {
 
         if (state
                 == ControllerState.DISABLED) {
+
             state =
                     ControllerState.IDLE;
         }
@@ -347,14 +389,12 @@ public final class SmoothController {
     }
 
     /**
-     * Resets controller state and counters.
+     * Resets the controller.
      */
     public void reset() {
 
         if (isActionActive()) {
-            HyperFrameSmoothEngineHolder
-                    .GUARD
-                    .completeAction();
+            safetyGuard.completeAction();
         }
 
         activeAction =
@@ -375,7 +415,8 @@ public final class SmoothController {
     }
 
     /**
-     * Converts SmoothEngine state into a controller state.
+     * Converts a SmoothEngine decision into
+     * an appropriate controller state.
      */
     private ControllerState determineStateFromEngine(
             SmoothEngine.Decision decision
@@ -412,48 +453,27 @@ public final class SmoothController {
     }
 
     /**
-     * Controller states.
+     * Controller state.
      */
     public enum ControllerState {
 
-        /**
-         * No action is currently required.
-         */
         IDLE,
 
-        /**
-         * Not enough baseline data yet.
-         */
         WARMING_UP,
 
-        /**
-         * HyperFrame is monitoring the situation.
-         */
         MONITORING,
 
-        /**
-         * An action passed both decision layers.
-         */
         ACTION_APPROVED,
 
-        /**
-         * An approved action is currently registered.
-         */
         ACTION_ACTIVE,
 
-        /**
-         * Safety system blocked the action.
-         */
         SAFETY_HOLD,
 
-        /**
-         * Controller is disabled.
-         */
         DISABLED
     }
 
     /**
-     * Result returned after a controller evaluation.
+     * Result of a controller evaluation.
      */
     public record Decision(
             Status status,
@@ -486,7 +506,7 @@ public final class SmoothController {
             );
         }
 
-        public static Decision engineRejected(
+        public static Decision blockedByEngine(
                 SmoothEngine.RejectReason reason
         ) {
             return new Decision(
@@ -497,7 +517,7 @@ public final class SmoothController {
             );
         }
 
-        public static Decision safetyRejected(
+        public static Decision blockedBySafety(
                 SafetyGuard.RejectReason reason
         ) {
             return new Decision(
@@ -505,18 +525,6 @@ public final class SmoothController {
                     SmoothEngine.OptimizationAction.NONE,
                     null,
                     reason
-            );
-        }
-
-        public static Decision blocked(
-                SmoothEngine.RejectReason reason,
-                SafetyGuard.RejectReason safetyReason
-        ) {
-            return new Decision(
-                    Status.BLOCKED_BY_ENGINE,
-                    SmoothEngine.OptimizationAction.NONE,
-                    reason,
-                    safetyReason
             );
         }
 
@@ -539,31 +547,17 @@ public final class SmoothController {
         }
     }
 
+    /**
+     * Controller decision status.
+     */
     public enum Status {
+
         APPROVED,
+
         ACTIVE,
+
         BLOCKED_BY_ENGINE,
+
         BLOCKED_BY_SAFETY
     }
-
-    /**
-     * Temporary dependency holder.
-     *
-     * The actual HyperFrame integration will replace this
-     * with the single shared instances from HyperFrame.java.
-     *
-     * Keeping the holder here makes the controller compile
-     * independently before that integration step.
-     */
-    private static final class HyperFrameSmoothEngineHolder {
-
-        private static final SmoothEngine ENGINE =
-                new SmoothEngine();
-
-        private static final SafetyGuard GUARD =
-                new SafetyGuard();
-
-        private HyperFrameSmoothEngineHolder() {
-        }
-    }
-          }
+            }
