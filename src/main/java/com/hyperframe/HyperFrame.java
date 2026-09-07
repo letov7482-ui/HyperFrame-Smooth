@@ -64,13 +64,9 @@ public class HyperFrame implements ClientModInitializer {
             new PerformanceTimeline();
 
     /**
-     * Manages performance replay capture.
-     */
-    public static final com.hyperframe.core.PerformanceReplayManager REPLAY_MANAGER =
-            new com.hyperframe.core.PerformanceReplayManager();
-
-    /**
-     * Manages complete LagEvent creation and history.
+     * Owns the complete lag-event lifecycle.
+     *
+     * This is now the single owner of performance replays.
      */
     public static final LagEventManager LAG_EVENT_MANAGER =
             new LagEventManager();
@@ -91,11 +87,11 @@ public class HyperFrame implements ClientModInitializer {
         );
 
         System.out.println(
-                "[HyperFrame] Performance Replay initialized."
+                "[HyperFrame] Lag Event System initialized."
         );
 
         System.out.println(
-                "[HyperFrame] Lag Event System initialized."
+                "[HyperFrame] Replay ownership unified."
         );
     }
 
@@ -124,24 +120,11 @@ public class HyperFrame implements ClientModInitializer {
         PERFORMANCE_TIMELINE.record(latestFrame);
 
         /*
-         * Continue collecting a replay that was
-         * started by an earlier performance event.
-         */
-        PerformanceReplay.Replay completedReplay =
-                REPLAY_MANAGER.update(
-                        PERFORMANCE_TIMELINE
-                );
-
-        if (completedReplay != null) {
-            onReplayCompleted(completedReplay);
-        }
-
-        /*
-         * Continue the LagEvent lifecycle.
+         * Continue collecting the currently active
+         * LagEvent replay.
          *
-         * When its replay becomes complete, the
-         * LagEventManager creates and stores a
-         * complete immutable LagEvent.
+         * If enough future frames have appeared,
+         * LagEventManager finalizes the event.
          */
         LagEvent completedLagEvent =
                 LAG_EVENT_MANAGER.update(
@@ -149,7 +132,9 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         if (completedLagEvent != null) {
-            onLagEventCompleted(completedLagEvent);
+            onLagEventCompleted(
+                    completedLagEvent
+            );
         }
 
         /*
@@ -161,7 +146,7 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * Store a complete performance snapshot.
+         * Store a performance snapshot.
          */
         PerformanceSnapshot snapshot =
                 PerformanceSnapshot.capture(
@@ -212,25 +197,10 @@ public class HyperFrame implements ClientModInitializer {
                 );
 
         /*
-         * Start the legacy replay manager.
-         *
-         * This keeps the existing replay API alive
-         * while the LagEventManager manages complete
-         * immutable LagEvents separately.
-         */
-        if (!REPLAY_MANAGER.isRecording()) {
-            REPLAY_MANAGER.start(
-                    event,
-                    PERFORMANCE_TIMELINE
-            );
-        }
-
-        /*
          * Start the complete LagEvent lifecycle.
          *
-         * LagEventManager has its own replay manager,
-         * so it can safely wait for the complete
-         * before/event/after replay.
+         * LagEventManager owns the replay and waits
+         * for the required future frames.
          */
         if (!LAG_EVENT_MANAGER.isRecording()) {
             LAG_EVENT_MANAGER.start(
@@ -260,53 +230,6 @@ public class HyperFrame implements ClientModInitializer {
                         + analysis.confidencePercent()
                         + "%"
         );
-    }
-
-    /**
-     * Called when a replay managed by the original
-     * PerformanceReplayManager is completed.
-     */
-    private static void onReplayCompleted(
-            PerformanceReplay.Replay replay
-    ) {
-        FrameSample center =
-                replay.getCenterFrame();
-
-        FrameSample worst =
-                replay.getWorstFrame();
-
-        System.out.println(
-                "[HyperFrame] "
-                        + "REPLAY COMPLETE"
-                        + " | eventFrame="
-                        + replay.event().frameNumber()
-                        + " | frames="
-                        + replay.getFrameCount()
-                        + " | type="
-                        + replay.type()
-        );
-
-        if (center != null) {
-            System.out.println(
-                    "[HyperFrame] "
-                            + "Replay center"
-                            + " | frametime="
-                            + format(center.frameTimeMs())
-                            + "ms"
-            );
-        }
-
-        if (worst != null) {
-            System.out.println(
-                    "[HyperFrame] "
-                            + "Replay worst"
-                            + " | frame="
-                            + worst.frameNumber()
-                            + " | frametime="
-                            + format(worst.frameTimeMs())
-                            + "ms"
-            );
-        }
     }
 
     /**
@@ -352,6 +275,14 @@ public class HyperFrame implements ClientModInitializer {
                         + "Replay"
                         + " | frames="
                         + event.replayFrameCount()
+        );
+
+        System.out.println(
+                "[HyperFrame] "
+                        + "Excess"
+                        + " | "
+                        + format(event.excessFrameTimeMs())
+                        + "ms"
         );
     }
 
@@ -406,15 +337,16 @@ public class HyperFrame implements ClientModInitializer {
      * Returns the latest completed replay.
      */
     public static PerformanceReplay.Replay getLatestReplay() {
-        return REPLAY_MANAGER.getLatestReplay();
+        return LAG_EVENT_MANAGER
+                .getLatestReplay();
     }
 
     /**
-     * Returns whether the original replay system
-     * is currently collecting a replay.
+     * Returns whether a replay is currently
+     * being collected.
      */
     public static boolean isReplayRecording() {
-        return REPLAY_MANAGER.isRecording();
+        return LAG_EVENT_MANAGER.isRecording();
     }
 
     /**
@@ -422,17 +354,17 @@ public class HyperFrame implements ClientModInitializer {
      * from 0.0 to 1.0.
      */
     public static double getReplayProgress() {
-        return REPLAY_MANAGER.getProgress(
+        return LAG_EVENT_MANAGER.getProgress(
                 PERFORMANCE_TIMELINE
         );
     }
 
     /**
      * Returns how many frames are still needed
-     * to complete the original replay.
+     * to complete the current replay.
      */
     public static int getReplayRemainingFrames() {
-        return REPLAY_MANAGER.getRemainingFrames(
+        return LAG_EVENT_MANAGER.getRemainingFrames(
                 PERFORMANCE_TIMELINE
         );
     }
@@ -494,6 +426,15 @@ public class HyperFrame implements ClientModInitializer {
     }
 
     /**
+     * Returns the complete LagEvent history.
+     */
+    public static LagEvent[] getLagEvents() {
+        return LAG_EVENT_MANAGER
+                .getHistory()
+                .getEvents();
+    }
+
+    /**
      * Clears all collected performance data.
      */
     public static void resetPerformanceData() {
@@ -502,7 +443,6 @@ public class HyperFrame implements ClientModInitializer {
         PERFORMANCE_HISTORY.reset();
         SNAPSHOT_HISTORY.reset();
         PERFORMANCE_TIMELINE.reset();
-        REPLAY_MANAGER.reset();
         LAG_EVENT_MANAGER.reset();
     }
 
