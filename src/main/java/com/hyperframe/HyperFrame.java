@@ -6,6 +6,8 @@ import com.hyperframe.core.FrameStatistics;
 import com.hyperframe.core.PerformanceAnalyzer;
 import com.hyperframe.core.PerformanceEvent;
 import com.hyperframe.core.PerformanceHistory;
+import com.hyperframe.core.PerformanceSnapshot;
+import com.hyperframe.core.PerformanceSnapshotHistory;
 import com.hyperframe.core.SpikeDetector;
 import net.fabricmc.api.ClientModInitializer;
 
@@ -42,6 +44,17 @@ public class HyperFrame implements ClientModInitializer {
     public static final PerformanceAnalyzer PERFORMANCE_ANALYZER =
             new PerformanceAnalyzer();
 
+    /**
+     * Stores recent performance snapshots.
+     */
+    public static final PerformanceSnapshotHistory SNAPSHOT_HISTORY =
+            new PerformanceSnapshotHistory();
+
+    /**
+     * Spike threshold used for general statistics.
+     */
+    private static final double SPIKE_THRESHOLD_MS = 25.0;
+
     @Override
     public void onInitializeClient() {
         System.out.println(
@@ -57,6 +70,26 @@ public class HyperFrame implements ClientModInitializer {
         SpikeDetector.SpikeResult result =
                 SPIKE_DETECTOR.analyze(FRAME_MONITOR);
 
+        /*
+         * Store a complete performance snapshot.
+         *
+         * Snapshots are useful even when there is no spike,
+         * because later we can reconstruct the performance
+         * history around a problematic moment.
+         */
+        PerformanceSnapshot snapshot =
+                PerformanceSnapshot.capture(
+                        FRAME_MONITOR,
+                        FRAME_STATISTICS,
+                        SPIKE_THRESHOLD_MS
+                );
+
+        SNAPSHOT_HISTORY.record(snapshot);
+
+        /*
+         * Nothing more to do when the current frame
+         * is considered normal.
+         */
         if (!result.detected()) {
             return;
         }
