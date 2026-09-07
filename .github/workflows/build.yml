@@ -1,30 +1,43 @@
-# Automatically build the project and run any configured tests for every push
-# and submitted pull request. This can help catch issues that only occur on
-# certain platforms or Java versions, and provides a first line of defence
-# against bad commits.
-
 name: build
-on: [pull_request, push]
+
+on:
+  pull_request:
+  push:
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+
     steps:
-      - name: checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v6
-      - name: validate gradle wrapper
+
+      - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
-      - name: setup jdk
+
+      - name: Setup JDK 21
         uses: actions/setup-java@v5
         with:
-          java-version: '25'
-          distribution: 'microsoft'
-      - name: make gradle wrapper executable
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
-      - name: build
-        run: ./gradlew build
-      - name: capture build artifacts
+
+      - name: Build
+        run: |
+          ./gradlew build --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.internal.http.connectionTimeout=60000
+            -Dorg.gradle.internal.http.socketTimeout=60000
+            -Dorg.gradle.internal.repository.max.retries=3
+            -Dorg.gradle.internal.repository.initial.backoff=1000
+
+      - name: Capture build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Artifacts
+          name: HyperFrame-${{ github.sha }}
           path: build/libs/
+          if-no-files-found: error
